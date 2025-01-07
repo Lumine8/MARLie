@@ -5,7 +5,6 @@ import os
 
 warnings.filterwarnings("ignore", category=DeprecationWarning) # Ignore deprecation warnings
 
-
 models_dir = "models/PPO"
 log_dir = "logs"
 
