@@ -39,23 +39,7 @@ class MultiAgentEnv(gym.Env):
         done = self.steps >= self.max_steps
         return self.agent_states.flatten(), np.sum(rewards), done, {}
 
-# Train PPO using domain randomization across multiple environments
-def train_domain_randomization(num_envs=3, timesteps=10000):
-    models = []
-    for i in range(num_envs):
-        env = MultiAgentEnv(num_agents=2)
-        model = PPO("MlpPolicy", env, verbose=0)
-        model.learn(total_timesteps=timesteps)
-        models.append(model)
-    return models
-
-# Fine-tune an existing model on a new environment (transfer learning)
-def fine_tune_transfer_learning(base_model, new_env, timesteps=5000):
-    base_model.set_env(new_env)
-    base_model.learn(total_timesteps=timesteps)
-    return base_model
-
-# Meta-Policy Network with Sigmoid Activation
+# Meta-Policy Network
 class MetaPolicy(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(MetaPolicy, self).__init__()
@@ -64,42 +48,15 @@ class MetaPolicy(nn.Module):
     
     def forward(self, x):
         x = torch.relu(self.fc1(x))
-        return torch.sigmoid(self.fc2(x))  # Ensure output is between 0 and 1
+        return torch.sigmoid(self.fc2(x))
 
-# Meta-Training with MSE Loss
-def meta_train(meta_model, num_tasks=3, meta_lr=0.01, meta_iterations=100):
-    optimizer = optim.Adam(meta_model.parameters(), lr=meta_lr)
+# Meta-Training
+def meta_train(meta_model, env, meta_iterations=100):
+    optimizer = optim.Adam(meta_model.parameters(), lr=0.01)
     for _ in range(meta_iterations):
-        for _ in range(num_tasks):
-            env = MultiAgentEnv(num_agents=2)
-            env.reset()
-            state = torch.tensor(env.agent_states.flatten(), dtype=torch.float32)
-            expected_rewards = torch.tensor([1.0] * 2, dtype=torch.float32)  # Simulated expected rewards
-            optimizer.zero_grad()
-            output = meta_model(state)
-            loss = torch.nn.functional.mse_loss(output, expected_rewards)  # MSE Loss
-            loss.backward()
-            optimizer.step()
-    return meta_model
-
-# Train domain-randomized PPO models
-randomized_models = train_domain_randomization(num_envs=3, timesteps=10000)
-
-# Select one model for domain-randomized transfer learning
-new_env = MultiAgentEnv(num_agents=2)
-dr_transfer_model = fine_tune_transfer_learning(randomized_models[0], new_env, timesteps=5000)
-
-# Train meta-learning model
-meta_model = MetaPolicy(input_dim=8, output_dim=2)
-meta_trained_model = meta_train(meta_model, num_tasks=3)
-
-# Fine-tune meta-learning model (Meta-Learning + Transfer Learning)
-def fine_tune_meta_learning(meta_model, new_env, meta_lr=0.001, meta_iterations=100):
-    optimizer = optim.Adam(meta_model.parameters(), lr=meta_lr)
-    for _ in range(meta_iterations):
-        new_env.reset()
-        state = torch.tensor(new_env.agent_states.flatten(), dtype=torch.float32)
-        expected_rewards = torch.tensor([1.0] * 2, dtype=torch.float32)  # Expected rewards for adaptation
+        env.reset()
+        state = torch.tensor(env.agent_states.flatten(), dtype=torch.float32)
+        expected_rewards = torch.tensor([1.0] * 2, dtype=torch.float32)
         optimizer.zero_grad()
         output = meta_model(state)
         loss = torch.nn.functional.mse_loss(output, expected_rewards)
@@ -107,17 +64,30 @@ def fine_tune_meta_learning(meta_model, new_env, meta_lr=0.001, meta_iterations=
         optimizer.step()
     return meta_model
 
-ml_transfer_model = fine_tune_meta_learning(meta_trained_model, new_env)
+# Train models
+env = MultiAgentEnv(num_agents=2)
+ppo_model = PPO("MlpPolicy", env, verbose=0)
+ppo_model.learn(total_timesteps=10000)
+
+domain_randomized_models = [PPO("MlpPolicy", MultiAgentEnv(num_agents=2), verbose=0) for _ in range(3)]
+for model in domain_randomized_models:
+    model.learn(total_timesteps=10000)
+dr_transfer_model = domain_randomized_models[0]
+dr_transfer_model.set_env(env)
+dr_transfer_model.learn(total_timesteps=5000)
+
+meta_model = MetaPolicy(input_dim=8, output_dim=2)
+meta_trained_model = meta_train(meta_model, env)
 
 # Performance Comparison
 test_env = MultiAgentEnv(num_agents=2)
 test_state = torch.tensor(test_env.reset(), dtype=torch.float32)
 
-# Evaluate Domain Randomization + Transfer Learning
-dr_transfer_rewards = np.mean([dr_transfer_model.predict(test_state.numpy())[0] for _ in range(10)])
+ppo_reward = np.mean([ppo_model.predict(test_state.numpy())[0] for _ in range(10)])
+dr_transfer_reward = np.mean([dr_transfer_model.predict(test_state.numpy())[0] for _ in range(10)])
+meta_reward = meta_trained_model(test_state).mean().item()
 
-# Evaluate Meta-Learning + Transfer Learning
-ml_transfer_rewards = ml_transfer_model(test_state).mean().item()
-
-print(f"Domain Randomization + Transfer Learning Reward: {dr_transfer_rewards}")
-print(f"Meta-Learning + Transfer Learning Reward: {ml_transfer_rewards}")
+print("\n--- Performance Comparison ---")
+print(f"PPO Reward: {ppo_reward}")
+print(f"Domain Randomization + Transfer Learning Reward: {dr_transfer_reward}")
+print(f"Meta-Learning + Transfer Learning Reward: {meta_reward}")
