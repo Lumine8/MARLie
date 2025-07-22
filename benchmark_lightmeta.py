@@ -3,13 +3,9 @@ from gymnasium import spaces
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import copy
-import time
 import random
 import matplotlib.pyplot as plt
-from scipy.stats import wilcoxon
-import pandas as pd
+import csv
 
 # ==========================
 #   GLOBAL CONSTANTS
@@ -43,6 +39,7 @@ def shape_multi_agent_rewards(rewards, agent_positions, goal_zones, num_agents):
         shaped_component = max(-0.5, min(0.5, cohesion_bonus + exploration_bonus))
         shaped_rewards[i] += shaped_component
     return shaped_rewards
+
 
 # ==========================
 #   ENVIRONMENTS
@@ -112,6 +109,7 @@ class MultiAgentEnv(gym.Env):
         avg_goal_distance = np.mean(new_distances)
         return padded_obs, np.sum(rewards) / self.num_agents, terminated, False, {"avg_goal_distance": avg_goal_distance}
 
+
 class UnseenMultiAgentEnv(MultiAgentEnv):
     def __init__(self, num_agents=2, seed=None):
         super().__init__(num_agents=num_agents, seed=seed)
@@ -122,8 +120,9 @@ class UnseenMultiAgentEnv(MultiAgentEnv):
         super().randomize_environment()
         self.move_range = np.random.randint(20, 40)
 
+
 # ==========================
-#   POLICY
+#   POLICIES
 # ==========================
 class LightMetaPolicy(nn.Module):
     def __init__(self, input_dim, output_dim):
@@ -163,8 +162,45 @@ class LightMetaPolicy(nn.Module):
         value = self.value_head(pooled)
         return action_probs, value
 
+
+class SimpleMLPPolicy(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_dim),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.net(x), None
+
+
+class RandomPolicy:
+    def forward(self, x):
+        batch_size = x.shape[0] if len(x.shape) > 1 else 1
+        return torch.rand((batch_size, MAX_AGENTS)), None
+
+
+class RuleBasedGreedyPolicy:
+    def __init__(self, threshold=0.1):
+        self.threshold = threshold
+
+    def forward(self, x):
+        batch_size = x.shape[0] if len(x.shape) > 1 else 1
+        actions = torch.zeros((batch_size, MAX_AGENTS))
+        for b in range(batch_size):
+            rel_dists = x[b, -MAX_AGENTS*2:].reshape(MAX_AGENTS, 2)
+            distances = torch.norm(rel_dists, dim=1)
+            actions[b] = (distances > self.threshold).float()
+        return actions, None
+
+
 # ==========================
-#   EVALUATION & CSV OUTPUT
+#   EVALUATION
 # ==========================
 def evaluate_meta_policy(model, env_fn, episodes=EPISODES):
     rewards = []
@@ -176,8 +212,7 @@ def evaluate_meta_policy(model, env_fn, episodes=EPISODES):
         done = False
         while not done:
             with torch.no_grad():
-                output = model(obs)
-                action_probs, _ = output if isinstance(output, tuple) else (output, None)
+                action_probs, _ = model.forward(obs)
                 actions = torch.bernoulli(action_probs).numpy()
             obs, reward, terminated, truncated, _ = env.step(np.array(actions).astype(int))
             obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -186,31 +221,92 @@ def evaluate_meta_policy(model, env_fn, episodes=EPISODES):
         rewards.append(total_reward)
     return np.mean(rewards), np.std(rewards), rewards
 
-def save_results_to_csv(results, filename="lightmeta_results.csv"):
-    df = pd.DataFrame(results)
-    print("\n=== Results Table ===")
-    print(df.to_string(index=False))
-    df.to_csv(filename, index=False)
-    print(f"\nResults saved to {filename}")
 
 # ==========================
-#   MAIN ENTRYPOINT
+#   MAIN TEST
 # ==========================
-if __name__ == "__main__":
+def test_lightmeta():
     input_dim = MAX_AGENTS * 6
     output_dim = MAX_AGENTS
-    model = LightMetaPolicy(input_dim, output_dim)
 
-    # Example evaluations for 1-5 agents
+    models = {
+        "LightMetaPolicy": LightMetaPolicy(input_dim, output_dim),
+        "SimpleMLPPolicy": SimpleMLPPolicy(input_dim, output_dim),
+        "RandomPolicy": RandomPolicy(),
+        "RuleBasedGreedyPolicy": RuleBasedGreedyPolicy()
+    }
+
+    agent_counts = [1, 2, 3, 4, 5]
     results = []
-    for num_agents in [1, 2, 3, 4, 5]:
-        env_factory = lambda seed=None: MultiAgentEnv(num_agents=num_agents, seed=seed)
-        avg_reward, std_reward, _ = evaluate_meta_policy(model, env_factory)
-        results.append({
-            "Agents": num_agents,
-            "Avg Reward": round(avg_reward, 2),
-            "Std Reward": round(std_reward, 2)
-        })
 
-    # Save and show results
-    save_results_to_csv(results)
+    print("\n=== Model Evaluation Across Agent Counts ===")
+    for num_agents in agent_counts:
+        env_factory = lambda seed=None: MultiAgentEnv(num_agents=num_agents, seed=seed)
+        for model_name, model in models.items():
+            mean_reward, std_reward, _ = evaluate_meta_policy(model, env_factory)
+            results.append({
+                "Agents": num_agents,
+                "Model": model_name,
+                "Avg Reward": mean_reward,
+                "Std Reward": std_reward
+            })
+            print(f"{model_name} | Agents {num_agents} | Avg: {mean_reward:.2f} ± {std_reward:.2f}")
+
+    final_rows = []
+    overall_efficiency = {}
+    for num_agents in agent_counts:
+        subset = [r for r in results if r["Agents"] == num_agents]
+        max_reward = max(r["Avg Reward"] for r in subset)
+        for r in subset:
+            efficiency = (r["Avg Reward"] / max_reward) * 100 if max_reward > 0 else 0
+            final_rows.append({**r, "Efficiency (%)": efficiency})
+            overall_efficiency[r["Model"]] = overall_efficiency.get(r["Model"], 0) + efficiency
+
+    for model in overall_efficiency:
+        overall_efficiency[model] /= len(agent_counts)
+        print(f"Overall Efficiency - {model}: {overall_efficiency[model]:.2f}%")
+
+    csv_file = "model_comparison_results.csv"
+    with open(csv_file, mode="w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["Agents", "Model", "Avg Reward", "Std Reward", "Efficiency (%)"])
+        writer.writeheader()
+        writer.writerows(final_rows)
+
+    print(f"\nResults saved to {csv_file}")
+    return final_rows, overall_efficiency
+
+
+# ==========================
+#   ENTRYPOINT
+# ==========================
+if __name__ == "__main__":
+    table, overall_efficiency = test_lightmeta()
+    print("\n=== Final Comparison Table ===")
+    for row in table:
+        print(row)
+
+    # Line plot of efficiencies
+    plt.figure(figsize=(10, 6))
+    for model_name in set(row["Model"] for row in table):
+        subset = [row for row in table if row["Model"] == model_name]
+        plt.plot([row["Agents"] for row in subset], [row["Efficiency (%)"] for row in subset],
+                 label=model_name, marker='o')
+    plt.title("Model Efficiency Comparison")
+    plt.xlabel("Number of Agents")
+    plt.ylabel("Efficiency (%)")
+    plt.legend()
+    plt.show()
+
+    # Bar chart of average rewards
+    plt.figure(figsize=(10, 6))
+    models = sorted(set(row["Model"] for row in table))
+    for i, model_name in enumerate(models):
+        subset = [row for row in table if row["Model"] == model_name]
+        plt.bar([x + i * 0.2 for x in range(len(subset))],
+                [row["Avg Reward"] for row in subset], width=0.2, label=model_name)
+    plt.xticks([x + 0.3 for x in range(len(subset))], [row["Agents"] for row in subset])
+    plt.title("Average Reward per Model per Agent Count")
+    plt.xlabel("Number of Agents")
+    plt.ylabel("Average Reward")
+    plt.legend()
+    plt.show()
