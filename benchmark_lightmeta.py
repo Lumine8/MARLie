@@ -6,11 +6,9 @@ import torch.nn as nn
 import random
 import matplotlib.pyplot as plt
 import csv
-import os
 
-# PettingZoo + Stable Baselines for benchmark environments and IPPO
 from pettingzoo.mpe import simple_spread_v3
-import supersuit as ss
+from supersuit import pettingzoo_env_to_vec_env_v1, concat_vec_envs_v1
 from stable_baselines3 import PPO
 
 # ==========================
@@ -25,7 +23,6 @@ EPISODES = 20
 np.random.seed(42)
 torch.manual_seed(42)
 random.seed(42)
-
 
 # ==========================
 #   REWARD SHAPING
@@ -49,7 +46,7 @@ def shape_multi_agent_rewards(rewards, agent_positions, goal_zones, num_agents):
 
 
 # ==========================
-#   CUSTOM ENVIRONMENTS
+#   ENVIRONMENTS
 # ==========================
 class MultiAgentEnv(gym.Env):
     def __init__(self, num_agents=2, seed=None):
@@ -196,22 +193,6 @@ class RuleBasedGreedyPolicy:
 
 
 # ==========================
-#   IPPO BASELINE
-# ==========================
-def train_ippo(env_name="simple_spread_v3", total_steps=5000):
-    from pettingzoo.mpe import simple_spread_v3
-    env = simple_spread_v3.parallel_env(N=3, max_cycles=25, local_ratio=0.5, continuous_actions=False)
-    env = ss.pettingzoo_env_to_vec_env_v1(env)
-    env = ss.concat_vec_envs_v1(env, 1, base_class="stable_baselines3")
-
-    model = PPO("MlpPolicy", env, verbose=0)
-    print(f"[IPPO] Training on {env_name} for {total_steps} steps...")
-    model.learn(total_steps)
-    return model
-
-
-
-# ==========================
 #   EVALUATION
 # ==========================
 def evaluate_meta_policy(model, env_fn, episodes=EPISODES):
@@ -232,6 +213,34 @@ def evaluate_meta_policy(model, env_fn, episodes=EPISODES):
             done = terminated or truncated
         rewards.append(total_reward)
     return np.mean(rewards), np.std(rewards), rewards
+
+
+# ==========================
+#   IPPO Benchmark
+# ==========================
+def train_ippo():
+    print("\n=== Training IPPO on simple_spread_v3 (PettingZoo Benchmark) ===")
+    env = simple_spread_v3.parallel_env(N=3, max_cycles=25, local_ratio=0.5, continuous_actions=False)
+    env = pettingzoo_env_to_vec_env_v1(env)
+    env = concat_vec_envs_v1(env, 1, num_cpus=1, base_class='stable_baselines3')
+
+    model = PPO("MlpPolicy", env, verbose=0, device="cpu")
+    model.learn(total_timesteps=5000)
+
+    eval_env = simple_spread_v3.parallel_env(N=3, max_cycles=25, local_ratio=0.5, continuous_actions=False)
+    total_reward = 0
+    for ep in range(10):
+        obs, _ = eval_env.reset()
+        terminations = {agent: False for agent in eval_env.agents}
+        truncations = {agent: False for agent in eval_env.agents}
+        while not (all(terminations.values()) or all(truncations.values())):
+            actions = {agent: model.predict(obs[agent], deterministic=True)[0] for agent in eval_env.agents}
+            obs, rewards, terminations, truncations, infos = eval_env.step(actions)
+            total_reward += sum(rewards.values())
+
+    avg_reward = total_reward / 10
+    print(f"IPPO Avg Reward (simple_spread_v3): {avg_reward:.2f}")
+    return avg_reward
 
 
 # ==========================
@@ -264,21 +273,19 @@ def test_lightmeta():
             })
             print(f"{model_name} | Agents {num_agents} | Avg: {mean_reward:.2f} ± {std_reward:.2f}")
 
-    # IPPO on PettingZoo Benchmark
-    ippo_model = train_ippo()
+    # Benchmark IPPO
+    ippo_score = train_ippo()
     results.append({
         "Agents": 3,
-        "Model": "IPPO_PPO (simple_spread_v2)",
-        "Avg Reward": 0.0,  # Placeholder
+        "Model": "IPPO_PPO (simple_spread_v3)",
+        "Avg Reward": ippo_score,
         "Std Reward": 0.0
     })
 
-    # Normalize efficiency relative to the best model
     final_rows = []
     overall_efficiency = {}
     for num_agents in agent_counts:
         subset = [r for r in results if r["Agents"] == num_agents]
-        if not subset: continue
         max_reward = max(r["Avg Reward"] for r in subset)
         for r in subset:
             efficiency = (r["Avg Reward"] / max_reward) * 100 if max_reward > 0 else 0
@@ -296,19 +303,19 @@ def test_lightmeta():
         writer.writerows(final_rows)
 
     print(f"\nResults saved to {csv_file}")
-    return final_rows, overall_efficiency
+    return final_rows, overall_efficiency, ippo_score
 
 
 # ==========================
 #   ENTRYPOINT
 # ==========================
 if __name__ == "__main__":
-    table, overall_efficiency = test_lightmeta()
+    table, overall_efficiency, ippo_score = test_lightmeta()
     print("\n=== Final Comparison Table ===")
     for row in table:
         print(row)
 
-    # Plot Efficiency
+    # Line plot of efficiencies
     plt.figure(figsize=(10, 6))
     for model_name in set(row["Model"] for row in table):
         subset = [row for row in table if row["Model"] == model_name]
@@ -317,5 +324,19 @@ if __name__ == "__main__":
     plt.title("Model Efficiency Comparison")
     plt.xlabel("Number of Agents")
     plt.ylabel("Efficiency (%)")
+    plt.legend()
+    plt.show()
+
+    # Bar chart of average rewards
+    plt.figure(figsize=(10, 6))
+    models = sorted(set(row["Model"] for row in table))
+    for i, model_name in enumerate(models):
+        subset = [row for row in table if row["Model"] == model_name]
+        plt.bar([x + i * 0.2 for x in range(len(subset))],
+                [row["Avg Reward"] for row in subset], width=0.2, label=model_name)
+    plt.xticks([x + 0.3 for x in range(len(subset))], [row["Agents"] for row in subset])
+    plt.title("Average Reward per Model per Agent Count")
+    plt.xlabel("Number of Agents")
+    plt.ylabel("Average Reward")
     plt.legend()
     plt.show()
