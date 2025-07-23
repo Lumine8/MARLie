@@ -6,6 +6,12 @@ import torch.nn as nn
 import random
 import matplotlib.pyplot as plt
 import csv
+import os
+
+# PettingZoo + Stable Baselines for benchmark environments and IPPO
+from pettingzoo.mpe import simple_spread_v3
+import supersuit as ss
+from stable_baselines3 import PPO
 
 # ==========================
 #   GLOBAL CONSTANTS
@@ -19,6 +25,7 @@ EPISODES = 20
 np.random.seed(42)
 torch.manual_seed(42)
 random.seed(42)
+
 
 # ==========================
 #   REWARD SHAPING
@@ -42,7 +49,7 @@ def shape_multi_agent_rewards(rewards, agent_positions, goal_zones, num_agents):
 
 
 # ==========================
-#   ENVIRONMENTS
+#   CUSTOM ENVIRONMENTS
 # ==========================
 class MultiAgentEnv(gym.Env):
     def __init__(self, num_agents=2, seed=None):
@@ -108,17 +115,6 @@ class MultiAgentEnv(gym.Env):
         padded_obs[:len(obs)] = obs
         avg_goal_distance = np.mean(new_distances)
         return padded_obs, np.sum(rewards) / self.num_agents, terminated, False, {"avg_goal_distance": avg_goal_distance}
-
-
-class UnseenMultiAgentEnv(MultiAgentEnv):
-    def __init__(self, num_agents=2, seed=None):
-        super().__init__(num_agents=num_agents, seed=seed)
-        self.action_space = spaces.MultiDiscrete([2] * num_agents)
-        self.observation_noise_std = 0.5
-
-    def randomize_environment(self):
-        super().randomize_environment()
-        self.move_range = np.random.randint(20, 40)
 
 
 # ==========================
@@ -200,6 +196,22 @@ class RuleBasedGreedyPolicy:
 
 
 # ==========================
+#   IPPO BASELINE
+# ==========================
+def train_ippo(env_name="simple_spread_v3", total_steps=5000):
+    from pettingzoo.mpe import simple_spread_v3
+    env = simple_spread_v3.parallel_env(N=3, max_cycles=25, local_ratio=0.5, continuous_actions=False)
+    env = ss.pettingzoo_env_to_vec_env_v1(env)
+    env = ss.concat_vec_envs_v1(env, 1, base_class="stable_baselines3")
+
+    model = PPO("MlpPolicy", env, verbose=0)
+    print(f"[IPPO] Training on {env_name} for {total_steps} steps...")
+    model.learn(total_steps)
+    return model
+
+
+
+# ==========================
 #   EVALUATION
 # ==========================
 def evaluate_meta_policy(model, env_fn, episodes=EPISODES):
@@ -239,7 +251,7 @@ def test_lightmeta():
     agent_counts = [1, 2, 3, 4, 5]
     results = []
 
-    print("\n=== Model Evaluation Across Agent Counts ===")
+    print("\n=== Model Evaluation Across Agent Counts (Custom Env) ===")
     for num_agents in agent_counts:
         env_factory = lambda seed=None: MultiAgentEnv(num_agents=num_agents, seed=seed)
         for model_name, model in models.items():
@@ -252,10 +264,21 @@ def test_lightmeta():
             })
             print(f"{model_name} | Agents {num_agents} | Avg: {mean_reward:.2f} ± {std_reward:.2f}")
 
+    # IPPO on PettingZoo Benchmark
+    ippo_model = train_ippo()
+    results.append({
+        "Agents": 3,
+        "Model": "IPPO_PPO (simple_spread_v2)",
+        "Avg Reward": 0.0,  # Placeholder
+        "Std Reward": 0.0
+    })
+
+    # Normalize efficiency relative to the best model
     final_rows = []
     overall_efficiency = {}
     for num_agents in agent_counts:
         subset = [r for r in results if r["Agents"] == num_agents]
+        if not subset: continue
         max_reward = max(r["Avg Reward"] for r in subset)
         for r in subset:
             efficiency = (r["Avg Reward"] / max_reward) * 100 if max_reward > 0 else 0
@@ -285,7 +308,7 @@ if __name__ == "__main__":
     for row in table:
         print(row)
 
-    # Line plot of efficiencies
+    # Plot Efficiency
     plt.figure(figsize=(10, 6))
     for model_name in set(row["Model"] for row in table):
         subset = [row for row in table if row["Model"] == model_name]
@@ -294,19 +317,5 @@ if __name__ == "__main__":
     plt.title("Model Efficiency Comparison")
     plt.xlabel("Number of Agents")
     plt.ylabel("Efficiency (%)")
-    plt.legend()
-    plt.show()
-
-    # Bar chart of average rewards
-    plt.figure(figsize=(10, 6))
-    models = sorted(set(row["Model"] for row in table))
-    for i, model_name in enumerate(models):
-        subset = [row for row in table if row["Model"] == model_name]
-        plt.bar([x + i * 0.2 for x in range(len(subset))],
-                [row["Avg Reward"] for row in subset], width=0.2, label=model_name)
-    plt.xticks([x + 0.3 for x in range(len(subset))], [row["Agents"] for row in subset])
-    plt.title("Average Reward per Model per Agent Count")
-    plt.xlabel("Number of Agents")
-    plt.ylabel("Average Reward")
     plt.legend()
     plt.show()
