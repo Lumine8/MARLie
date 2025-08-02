@@ -116,7 +116,8 @@ class UnseenMultiAgentEnv(MultiAgentEnv):
     def randomize_environment(self):
         super().randomize_environment()
         self.move_amount = np.random.randint(10, 20)
-# LightMetaPolicy (Unchanged)
+
+# LightMetaPolicy
 class LightMetaPolicy(nn.Module):
     def __init__(self, input_dim, output_channels):
         super().__init__()
@@ -143,11 +144,18 @@ class LightMetaPolicy(nn.Module):
         value = self.value_head(pooled)
         return action_logits, value
 
-## UPDATED ## - Training function upgraded to PPO with tuned hyperparameters.
+# Training Function
 def train_policy(model, env_fn, meta_iterations=1000, rollout_len=256, gamma=0.99, lr=3e-4,
                  ppo_epochs=10, clip_epsilon=0.2, entropy_coef=0.01):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     start_time = time.time()
+    reward_buffer = []
+
+    ## NEW ##: History trackers for plotting
+    history = {
+        "avg_raw_reward": [], "total_loss": [], "policy_loss": [],
+        "value_loss": [], "avg_goal_distance": []
+    }
 
     for iteration in range(meta_iterations):
         if iteration < meta_iterations * 0.4: num_agents = np.random.choice([1, 2])
@@ -157,8 +165,8 @@ def train_policy(model, env_fn, meta_iterations=1000, rollout_len=256, gamma=0.9
         env = env_fn(num_agents=num_agents)
         obs, _ = env.reset()
 
-        # --- Data Collection ---
-        batch_obs, batch_actions, batch_log_probs, batch_rewards, batch_values, batch_dones = [], [], [], [], [], []
+        # Data Collection
+        batch_obs, batch_actions, batch_log_probs, batch_rewards, batch_values, batch_dones, raw_rewards = [], [], [], [], [], [], []
         steps_this_rollout = 0
         while steps_this_rollout < rollout_len:
             obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -169,13 +177,14 @@ def train_policy(model, env_fn, meta_iterations=1000, rollout_len=256, gamma=0.9
             actions = dist.sample()
             log_prob = dist.log_prob(actions).sum()
             
-            next_obs, reward, terminated, truncated, _ = env.step(actions.numpy().astype(int))
+            next_obs, reward, terminated, truncated, info = env.step(actions.numpy().astype(int))
             done = terminated or truncated
-            
+
+            raw_rewards.append(reward) # Store raw reward
             batch_obs.append(obs)
             batch_actions.append(actions.numpy().flatten())
             batch_log_probs.append(log_prob.item())
-            batch_rewards.append(reward)
+            batch_rewards.append(reward) # Using raw reward for GAE
             batch_values.append(value.item())
             batch_dones.append(done)
             
@@ -184,7 +193,7 @@ def train_policy(model, env_fn, meta_iterations=1000, rollout_len=256, gamma=0.9
             if done:
                 obs, _ = env.reset()
 
-        # --- GAE and Returns Calculation ---
+        # GAE and Returns Calculation
         with torch.no_grad():
             _, last_value = model(torch.tensor(obs, dtype=torch.float32).unsqueeze(0))
         
@@ -200,7 +209,7 @@ def train_policy(model, env_fn, meta_iterations=1000, rollout_len=256, gamma=0.9
         returns = np.array(advantages) + np.array(batch_values)
         advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
         
-        # --- PPO Update ---
+        # PPO Update
         obs_t = torch.tensor(np.array(batch_obs), dtype=torch.float32)
         actions_t = torch.tensor(np.array(batch_actions), dtype=torch.long)
         old_log_probs_t = torch.tensor(batch_log_probs, dtype=torch.float32)
@@ -228,12 +237,21 @@ def train_policy(model, env_fn, meta_iterations=1000, rollout_len=256, gamma=0.9
             optimizer.step()
 
         if iteration % 20 == 0:
-            print(f"LightMeta Iter {iteration} | Avg Reward (Rollout): {np.mean(batch_rewards):.2f} | Total Loss: {loss.item():.3f}")
+            ## NEW ##: Enhanced logging with more metrics
+            avg_raw_reward = np.mean(raw_rewards)
+            print(f"Iter {iteration:4d} | Avg Raw Reward: {avg_raw_reward:6.2f} | "
+                  f"Total Loss: {loss.item():.3f} (P: {policy_loss.item():.3f}, V: {value_loss.item():.3f})")
+
+            # Store history for plotting
+            history["avg_raw_reward"].append(avg_raw_reward)
+            history["total_loss"].append(loss.item())
+            history["policy_loss"].append(policy_loss.item())
+            history["value_loss"].append(value_loss.item())
 
     training_time = time.time() - start_time
-    return model, training_time
+    return model, training_time, history
 
-## NEW ## - Proper PPO-based fine-tuning function.
+# Fine-Tuning Function
 def fine_tune_policy(model, env_fn, ft_steps=5000, lr=1e-4, gamma=0.99, ppo_epochs=4, clip_epsilon=0.2):
     print(f"Fine-tuning for {ft_steps} steps...")
     tuned_model = copy.deepcopy(model)
@@ -315,6 +333,41 @@ def evaluate_policy(model, env_fn, episodes=EPISODES):
         rewards.append(total_reward)
     return np.mean(rewards), np.std(rewards), rewards
 
+## NEW ##: Plotting function for training history
+def plot_training_history(history, title):
+    fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle(title, fontsize=16)
+
+    iterations = range(0, len(history["total_loss"]) * 20, 20)
+
+    # Plot Average Raw Reward
+    axs[0, 0].plot(iterations, history["avg_raw_reward"], label="Avg Raw Reward", color='green')
+    axs[0, 0].set_title("Average Raw Reward per Rollout")
+    axs[0, 0].set_xlabel("Meta Iteration")
+    axs[0, 0].set_ylabel("Reward")
+    axs[0, 0].grid(True)
+
+    # Plot Total Loss
+    axs[0, 1].plot(iterations, history["total_loss"], label="Total Loss", color='red')
+    axs[0, 1].set_title("Total Loss")
+    axs[0, 1].set_xlabel("Meta Iteration")
+    axs[0, 1].grid(True)
+
+    # Plot Policy and Value Loss
+    axs[1, 0].plot(iterations, history["policy_loss"], label="Policy Loss", color='blue')
+    axs[1, 0].set_title("Policy Loss (Actor)")
+    axs[1, 0].set_xlabel("Meta Iteration")
+    axs[1, 0].grid(True)
+
+    axs[1, 1].plot(iterations, history["value_loss"], label="Value Loss", color='orange')
+    axs[1, 1].set_title("Value Loss (Critic)")
+    axs[1, 1].set_xlabel("Meta Iteration")
+    axs[1, 1].grid(True)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+
+
 # Environment Factories
 def env_fn(num_agents=None, seed=None):
     if num_agents is None:
@@ -333,7 +386,7 @@ def test_lightmeta():
     model = LightMetaPolicy(input_dim, output_channels)
     params = sum(p.numel() for p in model.parameters())
     print("Training LightMetaPolicy with PPO...")
-    trained_model, training_time = train_policy(model, env_fn, meta_iterations=500)
+    trained_model, training_time, history = train_policy(model, env_fn, meta_iterations=500)
     print(f"Training completed in {training_time:.1f} seconds")
 
     agent_counts = [1, 2, 3, 4, 5]
@@ -365,6 +418,7 @@ def test_lightmeta():
     print("\n=== Compute Metrics ===")
     print(f"LightMeta: {params} params, {training_time:.1f}s")
 
+    # Plot evaluation results
     plt.figure(figsize=(12, 6))
     zero_shot = [v[0] for v in results["LightMeta"].values()]
     adapted = [v[1] for v in results["LightMeta"].values()]
@@ -376,6 +430,9 @@ def test_lightmeta():
     plt.legend()
     plt.grid(True)
     plt.show()
+
+    # Plot training history
+    plot_training_history(history, "Training History (500 Iterations)")
 
 if __name__ == "__main__":
     test_lightmeta()
