@@ -13,43 +13,81 @@ import multiprocessing as mp
 from pettingzoo.mpe import simple_spread_v3
 
 # --- SCRIPT CONFIGURATION ---
-# Define all the different configurations you want to test.
+# This is the complete list of all configurations we have tested.
 TUNING_CONFIGS = {
     "baseline": {
         "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": False,
         "use_relational_bias": True, "training_mode": "meta", "inner_rollouts": 40,
         "gamma": 0.99, "num_heads": 1, "use_residual": False,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
+    },
+    "higher_entropy": {
+        "lr": 0.0003, "entropy_coef": 0.05, "use_layer_norm": False,
+        "use_relational_bias": True, "training_mode": "meta", "inner_rollouts": 40,
+        "gamma": 0.99, "num_heads": 1, "use_residual": False,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
     },
     "with_layernorm": {
         "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": True,
         "use_relational_bias": True, "training_mode": "meta", "inner_rollouts": 40,
         "gamma": 0.99, "num_heads": 1, "use_residual": False,
-    },
-    "no_relational_bias": {
-        "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": False,
-        "use_relational_bias": False, "training_mode": "meta", "inner_rollouts": 40,
-        "gamma": 0.99, "num_heads": 1, "use_residual": False,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
     },
     "with_residual": {
         "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": False,
         "use_relational_bias": True, "training_mode": "meta", "inner_rollouts": 40,
         "gamma": 0.99, "num_heads": 1, "use_residual": True,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
     },
     "layernorm_and_residual": {
         "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": True,
         "use_relational_bias": True, "training_mode": "meta", "inner_rollouts": 40,
         "gamma": 0.99, "num_heads": 1, "use_residual": True,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
     },
-    # --- New Targeted Experiments for Simple Spread ---
     "champion_no_bias": {
         "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": True,
         "use_relational_bias": False, "training_mode": "meta", "inner_rollouts": 40,
         "gamma": 0.99, "num_heads": 1, "use_residual": True,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
     },
-    "champion_no_bias_high_entropy": {
-        "lr": 0.0003, "entropy_coef": 0.05, "use_layer_norm": True,
+    "champion_no_bias_no residual": {
+        "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": True,
+        "use_relational_bias": False, "training_mode": "meta", "inner_rollouts": 40,
+        "gamma": 0.99, "num_heads": 1, "use_residual": False,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
+    },
+    "champion_no_bias_no_layernorm": {
+        "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": False,
         "use_relational_bias": False, "training_mode": "meta", "inner_rollouts": 40,
         "gamma": 0.99, "num_heads": 1, "use_residual": True,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
+    },
+    "champion_with_augmentation": {
+        "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": True,
+        "use_relational_bias": True, "training_mode": "meta", "inner_rollouts": 40,
+        "gamma": 0.99, "num_heads": 1, "use_residual": True,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": True,
+    },
+    "champion_expanded_ffn": {
+        "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": True,
+        "use_relational_bias": True, "training_mode": "meta", "inner_rollouts": 40,
+        "gamma": 0.99, "num_heads": 1, "use_residual": True,
+        "ffn_expansion_factor": 4, 
+        "norm_style": "post_ln", "use_augmentation": False,
+    },
+    "champion_pre_ln": {
+        "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": True,
+        "use_relational_bias": True, "training_mode": "meta", "inner_rollouts": 40,
+        "gamma": 0.99, "num_heads": 1, "use_residual": True,
+        "ffn_expansion_factor": 1,
+        "norm_style": "pre_ln", "use_augmentation": False,
+    },
+     "no_meta_learning (train on N=3)": {
+        "lr": 0.0003, "entropy_coef": 0.01, "use_layer_norm": True,
+        "use_relational_bias": True, "training_mode": "fixed_n", "inner_rollouts": 40,
+        "gamma": 0.99, "num_heads": 1, "use_residual": True,
+        "ffn_expansion_factor": 1, "norm_style": "post_ln", "use_augmentation": False,
     },
 }
 
@@ -140,46 +178,80 @@ class SimpleSpreadWrapper(gym.Env):
 
 # --- Model ---
 class LightMetaPolicy(nn.Module):
-    def __init__(self, agent_obs_dim, num_actions, use_layer_norm=False, use_relational_bias=True, num_heads=1, use_residual=False):
+    def __init__(self, agent_obs_dim, num_actions, use_layer_norm=False, use_relational_bias=True, num_heads=1, use_residual=False, ffn_expansion_factor=1, norm_style='post_ln'):
         super().__init__()
         self.agent_dim, self.num_actions = agent_obs_dim, num_actions
         self.use_layer_norm, self.use_relational_bias = use_layer_norm, use_relational_bias
         self.num_heads, self.use_residual = num_heads, use_residual
+        self.norm_style = norm_style
         self.d_model = 64
         assert self.d_model % self.num_heads == 0, "d_model must be divisible by num_heads"
         self.head_dim = self.d_model // self.num_heads
-        self.key_transform = nn.Linear(self.agent_dim, self.d_model)
-        self.query_transform = nn.Linear(self.agent_dim, self.d_model)
-        self.value_transform = nn.Linear(self.agent_dim, self.d_model)
+        
+        self.input_proj = nn.Linear(self.agent_dim, self.d_model)
+        self.key_transform = nn.Linear(self.d_model, self.d_model)
+        self.query_transform = nn.Linear(self.d_model, self.d_model)
+        self.value_transform = nn.Linear(self.d_model, self.d_model)
+        
         if self.use_relational_bias: self.agent_relation = nn.Linear(self.d_model, self.d_model)
-        if self.use_layer_norm: self.layer_norm = nn.LayerNorm(self.d_model)
+        if self.use_layer_norm:
+            self.layer_norm1 = nn.LayerNorm(self.d_model)
+            self.layer_norm2 = nn.LayerNorm(self.d_model)
+
         self.fc_out = nn.Linear(self.d_model, self.d_model)
         output_logit_dim = MAX_AGENTS * self.num_actions
-        self.post_attention_fc1 = nn.Linear(self.d_model, self.d_model)
-        self.post_attention_act = nn.GELU()
-        self.post_attention_fc2 = nn.Linear(self.d_model, output_logit_dim)
+        
+        ffn_hidden_dim = self.d_model * ffn_expansion_factor
+        self.ffn = nn.Sequential(
+            nn.Linear(self.d_model, ffn_hidden_dim),
+            nn.GELU(),
+            nn.Linear(ffn_hidden_dim, self.d_model)
+        )
+        
+        self.action_head = nn.Linear(self.d_model, output_logit_dim)
         self.value_head = nn.Sequential(nn.Linear(self.d_model, 64), nn.GELU(), nn.Linear(64, 1))
+
     def forward(self, x):
         batch_size = x.shape[0] if len(x.shape) > 1 else 1
         agents = x.view(batch_size, MAX_AGENTS, self.agent_dim)
-        queries = self.query_transform(agents).view(batch_size, MAX_AGENTS, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        keys = self.key_transform(agents).view(batch_size, MAX_AGENTS, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        values = self.value_transform(agents).view(batch_size, MAX_AGENTS, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        
+        projected_agents = self.input_proj(agents)
+        
+        attn_input = projected_agents
+        if self.use_layer_norm and self.norm_style == 'pre_ln':
+            attn_input = self.layer_norm1(attn_input)
+
+        queries = self.query_transform(attn_input).view(batch_size, MAX_AGENTS, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        keys = self.key_transform(attn_input).view(batch_size, MAX_AGENTS, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        values = self.value_transform(attn_input).view(batch_size, MAX_AGENTS, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        
         attention = torch.matmul(queries, keys.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        
         if self.use_relational_bias:
             rel_queries = queries.permute(0, 2, 1, 3).reshape(batch_size, MAX_AGENTS, self.d_model)
             rel_bias_logits = self.agent_relation(rel_queries).view(batch_size, MAX_AGENTS, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             attention += torch.matmul(rel_bias_logits, queries.transpose(-2,-1)) / (self.head_dim ** 0.5)
+
         attention = torch.softmax(attention, dim=-1)
         context = torch.matmul(attention, values).permute(0, 2, 1, 3).reshape(batch_size, MAX_AGENTS, self.d_model)
         context = self.fc_out(context)
+        
+        if self.use_residual: context = context + projected_agents
+        if self.use_layer_norm and self.norm_style == 'post_ln': context = self.layer_norm1(context)
+        
         agent_mask = (agents.abs().sum(dim=-1, keepdim=True) > 0.01).float()
         pooled = (context * agent_mask).sum(dim=1) / (agent_mask.sum(dim=1) + 1e-8)
-        if self.use_layer_norm: pooled = self.layer_norm(pooled)
-        ff_out = self.post_attention_fc1(pooled)
-        if self.use_residual: ff_out = ff_out + pooled
-        ff_out = self.post_attention_act(ff_out)
-        action_logits = self.post_attention_fc2(ff_out).view(batch_size, MAX_AGENTS, self.num_actions)
+        
+        ffn_input = pooled
+        if self.use_layer_norm and self.norm_style == 'pre_ln':
+            ffn_input = self.layer_norm2(ffn_input)
+
+        ffn_out = self.ffn(ffn_input)
+        
+        if self.use_residual: ffn_out = ffn_out + pooled
+        if self.use_layer_norm and self.norm_style == 'post_ln': ffn_out = self.layer_norm2(ffn_out)
+        
+        action_logits = self.action_head(ffn_out).view(batch_size, MAX_AGENTS, self.num_actions)
         value = self.value_head(pooled)
         return action_logits, value
 
@@ -190,30 +262,27 @@ def run_single_seed(args):
     np.random.seed(seed); torch.manual_seed(seed); random.seed(seed)
     
     seed_results = {}
+    total_train_time = 0
+    param_count = 0
 
-    # --- Train and Evaluate for each domain (Custom and Simple Spread) ---
-    for domain in ["Custom", "SimpleSpread"]:
-        if domain == "Custom":
-            train_env_config = all_env_configs["CustomEnv"]
-            eval_env_configs = {
-                "Custom Env (ID)": all_env_configs["CustomEnv"],
-                "Unseen Env (OOD)": all_env_configs["UnseenEnv"]
-            }
-        else: # SimpleSpread
-            train_env_config = all_env_configs["SimpleSpread"]
-            eval_env_configs = {"Simple Spread": all_env_configs["SimpleSpread"]}
-
+    for domain in ["CustomEnv", "SimpleSpread"]:
+        train_env_config = all_env_configs[domain]
         train_env_fn = train_env_config["fn"]
+        
         model = LightMetaPolicy(
             agent_obs_dim=train_env_config["agent_obs_dim"], 
             num_actions=train_env_config["num_actions"],
             use_layer_norm=config["use_layer_norm"],
             use_relational_bias=config.get("use_relational_bias", True),
             num_heads=config.get("num_heads", 1),
-            use_residual=config.get("use_residual", False)
+            use_residual=config.get("use_residual", False),
+            ffn_expansion_factor=config.get("ffn_expansion_factor", 1),
+            norm_style=config.get("norm_style", 'post_ln')
         )
+        param_count = sum(p.numel() for p in model.parameters())
         optimizer = optim.Adam(model.parameters(), lr=config["lr"])
         
+        start_time = time.time()
         for iteration in range(META_ITERATIONS):
             if config.get("training_mode", "meta") == 'fixed_n': num_agents = 3
             else: num_agents = np.random.choice([2, 3, 4, 5])
@@ -221,6 +290,10 @@ def run_single_seed(args):
             env = train_env_fn(num_agents=num_agents, seed=seed + iteration)
             obs, _ = env.reset()
             obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+            
+            if config.get("use_augmentation", False):
+                obs += torch.randn_like(obs) * 0.02
+
             log_probs, rewards, values, entropies = [], [], [], []
             for _ in range(config["inner_rollouts"]):
                 action_logits, value = model(obs)
@@ -240,7 +313,13 @@ def run_single_seed(args):
             loss = policy_loss + 0.5 * value_loss - config["entropy_coef"] * torch.stack(entropies).mean()
             optimizer.zero_grad(); loss.backward(); optimizer.step()
         
-        # --- Evaluation for this domain ---
+        total_train_time += time.time() - start_time
+        
+        if domain == "CustomEnv":
+            eval_env_configs = {"Custom Env (ID)": all_env_configs["CustomEnv"], "Unseen Env (OOD)": all_env_configs["UnseenEnv"]}
+        else:
+            eval_env_configs = {"Simple Spread": all_env_configs["SimpleSpread"]}
+
         for eval_name, eval_config in eval_env_configs.items():
             eval_env_fn = lambda seed=None: eval_config["fn"](num_agents=5, seed=seed)
             final_rewards = []
@@ -257,6 +336,8 @@ def run_single_seed(args):
                 final_rewards.append(total_reward)
             seed_results[eval_name] = np.mean(final_rewards)
     
+    seed_results["train_time"] = total_train_time
+    seed_results["param_count"] = param_count
     print(f"  Finished seed {seed} for {config_name}.")
     return seed_results
 
@@ -269,10 +350,12 @@ def train_and_evaluate_config(config_name, config, all_env_configs):
     
     eval_names_from_worker = ["Custom Env (ID)", "Unseen Env (OOD)", "Simple Spread"]
     aggregated_results = {eval_name: [] for eval_name in eval_names_from_worker}
+    aggregated_results["train_time"] = []
+    aggregated_results["param_count"] = []
     
     for seed_result in results_from_seeds:
-        for eval_name, reward in seed_result.items():
-            aggregated_results[eval_name].append(reward)
+        for key, value in seed_result.items():
+            aggregated_results[key].append(value)
     
     final_means = {name: np.mean(rewards) for name, rewards in aggregated_results.items()}
     final_stds = {name: np.std(rewards) for name, rewards in aggregated_results.items()}
@@ -309,9 +392,11 @@ if __name__ == "__main__":
 
     sorted_results = sorted(results.items(), key=lambda item: item[1]["avg_rank"])
     
-    header = f"{'Configuration':<35} | " + " | ".join([f'{name:<18}' for name in eval_names]) + f" | {'Avg Rank':<10}"
+    header = f"{'Configuration':<35} | " + " | ".join([f'{name:<18}' for name in eval_names]) + f" | {'Avg Rank':<10} | {'Parameters':<12} | {'Train Time (s)':<15}"
     print(header)
     print("-" * (len(header) + 2))
     for config_name, res in sorted_results:
         mean_scores = " | ".join([f'{res["means"][name]:<18.2f}' for name in eval_names])
-        print(f"{config_name:<35} | {mean_scores} | {res['avg_rank']:<10.2f}")
+        params = f'{res["means"]["param_count"]:<12.0f}'
+        train_time = f'{res["means"]["train_time"]:<15.2f}'
+        print(f"{config_name:<35} | {mean_scores} | {res['avg_rank']:<10.2f} | {params} | {train_time}")

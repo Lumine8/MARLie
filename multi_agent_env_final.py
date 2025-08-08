@@ -132,43 +132,77 @@ class SimpleSpreadWrapper(gym.Env):
 
 # --- Models ---
 class LightMetaPolicy(nn.Module):
-    def __init__(self, agent_obs_dim, num_actions, use_layer_norm=True, use_residual=True):
+    """
+    The definitive champion LightMetaPolicy architecture based on comprehensive tuning.
+    It uses a residual connection but disables Layer Normalization and the relational
+    bias for the best all-around performance and efficiency.
+    """
+    def __init__(self, agent_obs_dim, num_actions, use_layer_norm=False, use_residual=True, use_relational_bias=False):
         super().__init__()
         self.agent_dim, self.num_actions = agent_obs_dim, num_actions
         self.use_layer_norm, self.use_residual = use_layer_norm, use_residual
+        self.use_relational_bias = use_relational_bias
         self.d_model = 64
+        
         self.input_proj = nn.Linear(self.agent_dim, self.d_model)
         self.key_transform = nn.Linear(self.d_model, self.d_model)
         self.query_transform = nn.Linear(self.d_model, self.d_model)
         self.value_transform = nn.Linear(self.d_model, self.d_model)
+        
+        # These layers are conditionally created but will be unused with default champion settings
+        if self.use_relational_bias: self.agent_relation = nn.Linear(self.d_model, self.d_model)
         if self.use_layer_norm: self.layer_norm1 = nn.LayerNorm(self.d_model)
+        
         self.fc_out = nn.Linear(self.d_model, self.d_model)
         self.ffn = nn.Sequential(nn.Linear(self.d_model, self.d_model), nn.GELU(), nn.Linear(self.d_model, self.d_model))
+        
         if self.use_layer_norm: self.layer_norm2 = nn.LayerNorm(self.d_model)
+        
         self.action_head = nn.Linear(self.d_model, MAX_AGENTS * self.num_actions)
         self.value_head = nn.Sequential(nn.Linear(self.d_model, 64), nn.GELU(), nn.Linear(64, 1))
 
     def forward(self, x):
         batch_size = x.shape[0] if len(x.shape) > 1 else 1
         agents = x.view(batch_size, MAX_AGENTS, self.agent_dim)
+        
         projected_agents = self.input_proj(agents)
+        
         queries = self.query_transform(projected_agents).unsqueeze(2)
         keys = self.key_transform(projected_agents).unsqueeze(2)
         values = self.value_transform(projected_agents).unsqueeze(2)
+        
         attention = torch.matmul(queries, keys.transpose(-2, -1)) / (self.d_model ** 0.5)
+        
+        # This block will be skipped with the default champion settings
+        if self.use_relational_bias:
+            rel_queries = queries.squeeze(2)
+            rel_bias_logits = self.agent_relation(rel_queries).unsqueeze(2)
+            attention += torch.matmul(rel_bias_logits, queries.transpose(-2,-1)) / (self.d_model ** 0.5)
+            
         attention = torch.softmax(attention, dim=-1)
         context = torch.matmul(attention, values).squeeze(2)
         context = self.fc_out(context)
-        if self.use_residual: context = context + projected_agents
-        if self.use_layer_norm: context = self.layer_norm1(context)
+        
+        if self.use_residual: 
+            context = context + projected_agents
+        # This block will be skipped with the default champion settings
+        if self.use_layer_norm: 
+            context = self.layer_norm1(context)
+            
         agent_mask = (agents.abs().sum(dim=-1, keepdim=True) > 0.01).float()
         pooled = (context * agent_mask).sum(dim=1) / (agent_mask.sum(dim=1) + 1e-8)
+        
         ffn_out = self.ffn(pooled)
-        if self.use_residual: ffn_out = ffn_out + pooled
-        if self.use_layer_norm: ffn_out = self.layer_norm2(ffn_out)
+        if self.use_residual: 
+            ffn_out = ffn_out + pooled
+        # This block will be skipped with the default champion settings
+        if self.use_layer_norm: 
+            ffn_out = self.layer_norm2(ffn_out)
+            
         action_logits = self.action_head(ffn_out).view(batch_size, MAX_AGENTS, self.num_actions)
         value = self.value_head(pooled)
         return action_logits, value
+
 
 class MAPPOPolicy(nn.Module):
     def __init__(self, agent_obs_dim, num_actions):
@@ -489,7 +523,7 @@ def process_and_display_results(all_runs_results, env_name):
     
     # --- In-Distribution Results Table ---
     print("\n" + "="*20 + " IN-DISTRIBUTION PERFORMANCE (TABLE) " + "="*20)
-    header_parts = [f"{f'N={n} Agents':<18}" for n in agent_counts]
+    header_parts = [f"N={n} Agents".ljust(18) for n in agent_counts]
     header = f"{'Model':<28} | " + " | ".join(header_parts)
     print(header); print("-" * len(header))
     for i, method in enumerate(["Zero-Shot", "Adapted (Full)", "Adapted (LoRASA)"]):
